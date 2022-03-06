@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -13,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -24,41 +38,110 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	for true { //循环要Map任务
+		args := AskForMapArgs{}
+		reply := AskForMapReply{}
+		if !call("Coordinator.AskForMap", &args, &reply) {
+			return
+		}
+		fmt.Printf("AskForMapReply: %v\n", reply)
 
-	// Your worker implementation here.
+		if reply.Done { //Map阶段结束
+			break
+		}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		if reply.TaskId != -1 {
+			reduceContent := make([][]KeyValue, reply.NReduce)
+			file, err := os.Open(reply.FileName)
+			if err != nil {
+				log.Fatalf("cannot open %v", reply.FileName)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", reply.FileName)
+			}
+			file.Close()
+			kva := mapf(reply.FileName, string(content))
+			for _, kv := range kva { //将中间kv对分散到n个Reduce任务
+				idx := ihash(kv.Key) % reply.NReduce
+				reduceContent[idx] = append(reduceContent[idx], kv)
+			}
 
-}
+			for i, content := range reduceContent {
+				tmpFile, _ := ioutil.TempFile("", "mr-tmp-*.json")
+				jsonByte, _ := json.Marshal(content)
+				tmpFile.Write(jsonByte)
+				os.Rename(tmpFile.Name(), fmt.Sprintf("mr-%v-%v.json", reply.TaskId, i))
+			}
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
+			doneArgs := MapTaskDoneArgs{TaskId: reply.TaskId}
+			doneReply := MapTaskDoneReply{}
+			if !call("Coordinator.MapTaskDone", &doneArgs, &doneReply) {
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+	for true { //循环要Reduce任务
+		args := AskForReduceArgs{}
+		reply := AskForReduceReply{}
+		if !call("Coordinator.AskForReduce", &args, &reply) {
+			return
+		}
+		fmt.Printf("AskForReduceReply: %v\n", reply)
 
-	// fill in the argument(s).
-	args.X = 99
+		if reply.Done { //Reduce阶段结束
+			break
+		}
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+		if reply.TaskId != -1 {
+			intermediate := []KeyValue{}
+			for i := 0; i < reply.NMap; i++ {
+				file, err := os.Open(fmt.Sprintf("mr-%v-%v.json", i, reply.TaskId))
+				if err != nil {
+					log.Fatalf("cannot open %v", fmt.Sprintf("mr-%v-%v.json", i, reply.TaskId))
+				}
+				content, err := ioutil.ReadAll(file)
+				if err != nil {
+					log.Fatalf("cannot read %v", fmt.Sprintf("mr-%v-%v.json", i, reply.TaskId))
+				}
+				file.Close()
+				var kva []KeyValue
+				_ = json.Unmarshal(content, &kva)
+				intermediate = append(intermediate, kva...)
+			}
+			sort.Sort(ByKey(intermediate))
 
-	// send the RPC request, wait for the reply.
-	call("Coordinator.Example", &args, &reply)
+			tmpFile, _ := ioutil.TempFile("", "mr-tmp-*.txt")
+			for i := 0; i < len(intermediate); {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
 
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+				fmt.Fprintf(tmpFile, "%v %v\n", intermediate[i].Key, output)
+
+				i = j
+			}
+			os.Rename(tmpFile.Name(), fmt.Sprintf("mr-out-%v", reply.TaskId))
+			doneArgs := ReduceTaskDoneArgs{TaskId: reply.TaskId}
+			doneReply := ReduceTaskDoneReply{}
+			if !call("Coordinator.ReduceTaskDone", &doneArgs, &doneReply) {
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 //
