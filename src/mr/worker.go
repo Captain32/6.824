@@ -45,7 +45,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	for true { //循环要Map任务
 		args := AskForMapArgs{}
 		reply := AskForMapReply{}
-		if !call("Coordinator.AskForMap", &args, &reply) {
+		if !call("Coordinator.AskForMap", &args, &reply) { //call返回false，代表协调者已退出，worker也随之退出
 			return
 		}
 		fmt.Printf("AskForMapReply: %v\n", reply)
@@ -54,7 +54,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			break
 		}
 
-		if reply.TaskId != -1 {
+		if reply.TaskId != -1 { //有分配任务
 			reduceContent := make([][]KeyValue, reply.NReduce)
 			file, err := os.Open(reply.FileName)
 			if err != nil {
@@ -71,7 +71,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				reduceContent[idx] = append(reduceContent[idx], kv)
 			}
 
-			for i, content := range reduceContent {
+			for i, content := range reduceContent { //写中间文件
 				tmpFile, _ := ioutil.TempFile("", "mr-tmp-*.json")
 				jsonByte, _ := json.Marshal(content)
 				tmpFile.Write(jsonByte)
@@ -80,11 +80,11 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 			doneArgs := MapTaskDoneArgs{TaskId: reply.TaskId}
 			doneReply := MapTaskDoneReply{}
-			if !call("Coordinator.MapTaskDone", &doneArgs, &doneReply) {
+			if !call("Coordinator.MapTaskDone", &doneArgs, &doneReply) { //通知该map任务已完成
 				return
 			}
 		}
-		time.Sleep(time.Second)
+		time.Sleep(time.Second) //睡1s再继续要
 	}
 
 	for true { //循环要Reduce任务
@@ -99,9 +99,9 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			break
 		}
 
-		if reply.TaskId != -1 {
+		if reply.TaskId != -1 { //有分配任务
 			intermediate := []KeyValue{}
-			for i := 0; i < reply.NMap; i++ {
+			for i := 0; i < reply.NMap; i++ { //读取所有属于该reduce任务的中间文件
 				file, err := os.Open(fmt.Sprintf("mr-%v-%v.json", i, reply.TaskId))
 				if err != nil {
 					log.Fatalf("cannot open %v", fmt.Sprintf("mr-%v-%v.json", i, reply.TaskId))
@@ -136,11 +136,11 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			os.Rename(tmpFile.Name(), fmt.Sprintf("mr-out-%v", reply.TaskId))
 			doneArgs := ReduceTaskDoneArgs{TaskId: reply.TaskId}
 			doneReply := ReduceTaskDoneReply{}
-			if !call("Coordinator.ReduceTaskDone", &doneArgs, &doneReply) {
+			if !call("Coordinator.ReduceTaskDone", &doneArgs, &doneReply) { //通知该reduce任务已完成
 				return
 			}
 		}
-		time.Sleep(time.Second)
+		time.Sleep(time.Second) //睡1s再继续要
 	}
 }
 

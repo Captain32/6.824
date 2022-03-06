@@ -14,14 +14,14 @@ type AskForMapArgs struct {
 }
 
 type AskForMapReply struct {
-	TaskId   int
-	NReduce  int
-	FileName string
-	Done     bool
+	TaskId   int    //任务id
+	NReduce  int    //Reduce分区数目
+	FileName string //本map任务对应的文件
+	Done     bool   //Map阶段是否结束
 }
 
 type MapTaskDoneArgs struct {
-	TaskId int
+	TaskId int //任务id
 }
 
 type MapTaskDoneReply struct {
@@ -31,13 +31,13 @@ type AskForReduceArgs struct {
 }
 
 type AskForReduceReply struct {
-	TaskId int
-	NMap   int
-	Done   bool
+	TaskId int  //任务id
+	NMap   int  //Map任务数目(需要读中间文件的个数)
+	Done   bool //Reduce阶段是否结束
 }
 
 type ReduceTaskDoneArgs struct {
-	TaskId int
+	TaskId int //任务id
 }
 
 type ReduceTaskDoneReply struct {

@@ -19,9 +19,9 @@ type task struct {
 type Coordinator struct {
 	files       []string
 	nReduce     int
-	mu          sync.Mutex
-	mapTasks    []task
-	reduceTasks []task
+	mu          sync.Mutex //防止竞争，其实可以更细粒度
+	mapTasks    []task     //map任务
+	reduceTasks []task     //reduce任务
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -33,14 +33,14 @@ func (c *Coordinator) AskForMap(args *AskForMapArgs, reply *AskForMapReply) erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, task := range c.mapTasks {
-		if task.state == 0 || (task.state == 1 && time.Now().Sub(task.startTime).Seconds() > 10) {
+		if task.state == 0 || (task.state == 1 && time.Now().Sub(task.startTime).Seconds() > 10) { //未开始or运行中但超时10s
 			c.mapTasks[i].state = 1
 			c.mapTasks[i].startTime = time.Now()
 			reply.FileName = c.files[i]
 			reply.TaskId = i
 			fmt.Printf("MapTask %v dipatched, file name: %v\n", i, c.files[i])
 			break
-		} else if task.state == 2 {
+		} else if task.state == 2 { //检查map阶段是否结束
 			unFinished--
 		}
 	}
@@ -66,13 +66,13 @@ func (c *Coordinator) AskForReduce(args *AskForReduceArgs, reply *AskForReduceRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, task := range c.reduceTasks {
-		if task.state == 0 || (task.state == 1 && time.Now().Sub(task.startTime).Seconds() > 10) {
+		if task.state == 0 || (task.state == 1 && time.Now().Sub(task.startTime).Seconds() > 10) { //未开始or运行中但超时10s
 			c.reduceTasks[i].state = 1
 			c.reduceTasks[i].startTime = time.Now()
 			reply.TaskId = i
 			fmt.Printf("ReduceTask %v dipatched\n", i)
 			break
-		} else if task.state == 2 {
+		} else if task.state == 2 { //检查reduce阶段是否结束
 			unFinished--
 		}
 	}
@@ -113,7 +113,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, task := range c.reduceTasks {
+	for _, task := range c.reduceTasks { //所有reduce任务都需完成
 		if task.state != 2 {
 			return false
 		}
