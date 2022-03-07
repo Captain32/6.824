@@ -373,7 +373,7 @@ func (rf *Raft) broadcastHeartbeat() {
 		}(i)
 	}
 	rf.electionTimer.Reset(electionTimeout()) //重置超时
-	rf.electionTimer.Reset(heartbeatTimeout())
+	rf.heartbeatTimer.Reset(heartbeatTimeout())
 }
 
 //
@@ -434,7 +434,7 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == StateLeader {
-				rf.broadcastHeartbeat()
+				go rf.broadcastHeartbeat() //因为外部lock了mu锁，这里用go，不然死锁
 			}
 			rf.mu.Unlock()
 		}
