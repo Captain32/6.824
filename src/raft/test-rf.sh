@@ -14,7 +14,8 @@ chmod +x test-rf.sh
 
 for i in $(seq 1 $runs); do
     echo 'Trail ' $i
-    go test -run 2B > test.txt
+    #go test -run TestSnapshotInstallUnreliable2D > test.txt
+    go test > test.txt
     if grep -q 'FAIL' test.txt; then
         echo '***' FAILED TESTS IN TRIAL $i
         exit 1
