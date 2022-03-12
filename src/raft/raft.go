@@ -109,7 +109,11 @@ func heartbeatTimeout() time.Duration {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return rf.currentTerm, rf.state == StateLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term := rf.currentTerm
+	isLeader := rf.state == StateLeader
+	return term, isLeader
 }
 
 //
@@ -512,6 +516,11 @@ func (rf *Raft) sendOneEntryToPeer(server int, heartbeatFlag bool) { //为server
 			DPrintf("Term %v: Leader %v receive InstallSnapshot reply %v from Server %v\n", rf.currentTerm, rf.me, reply, server)
 			if rf.state == StateLeader && rf.currentTerm == reply.Term { //本机是当前term的leader
 				rf.nextIndex[server] = Max(rf.nextIndex[server], args.LastIncludedIndex+1)
+			} else if rf.currentTerm < reply.Term {
+				rf.state = StateFollower
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.persist()
 			}
 		}
 	} else { //通过AppendEntries发送
@@ -559,8 +568,15 @@ func (rf *Raft) sendOneEntryToPeer(server int, heartbeatFlag bool) { //为server
 						rf.nextIndex[server] = reply.ConflictIndex
 					}
 				}
+			} else if rf.currentTerm < reply.Term {
+				rf.state = StateFollower
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.persist()
 			}
 		} else {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			DPrintf("Term %v: Server %v send log entry %v to Server %v failed\n", rf.currentTerm, rf.me, args.Entries, server)
 		}
 	}
@@ -628,7 +644,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, entry)
 	rf.persist()
 	rf.matchIndex[rf.me] = entry.Index //记得给自己标记...
-	go rf.broadcastHeartbeat(false)
+	rf.broadcastHeartbeat(false)
 
 	DPrintf("Term %v: Server %v process new request entry %v\n", rf.currentTerm, rf.me, entry)
 
