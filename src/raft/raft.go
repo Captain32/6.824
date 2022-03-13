@@ -708,11 +708,12 @@ func (rf *Raft) applier() {
 		for rf.lastApplied >= rf.commitIndex {
 			rf.applyCond.Wait()
 		}
+		tmpMe := rf.me
 		applyEntries := rf.log[rf.lastApplied-rf.log[0].Index+1 : rf.commitIndex-rf.log[0].Index+1]
 		rf.mu.Unlock() //释放锁，后续用复制品applyEntries，避免阻塞其他函数
 
 		for _, entry := range applyEntries {
-			DPrintf("Term %v: Server %v apply entry %v\n", rf.currentTerm, rf.me, entry.Index)
+			DPrintf("Term %v: Server %v apply entry %v\n", entry.Term, tmpMe, entry.Index) //防止Data Race
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      entry.Command,
