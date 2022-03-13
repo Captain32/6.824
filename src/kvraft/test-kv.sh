@@ -15,7 +15,7 @@ chmod +x test-kv.sh
 for i in $(seq 1 $runs); do
     echo 'Trail ' $i
     #go test -run TestSnapshotInstallUnreliable2D > test_1.txt
-    go test -race -run TestSpeed3A> test.txt
+    go test -race > test.txt
     if grep -q 'FAIL' test.txt; then
         echo '***' FAILED TESTS IN TRIAL $i
         exit 1

@@ -159,6 +159,10 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.mu.Unlock()
 }
 
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.

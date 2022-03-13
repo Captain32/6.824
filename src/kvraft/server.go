@@ -4,6 +4,8 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -31,8 +33,8 @@ type Op struct {
 }
 
 type LastContext struct {
-	commandId int64
-	reply     *CommandReply
+	CommandId int64
+	Reply     CommandReply
 }
 
 type KVServer struct {
@@ -56,10 +58,10 @@ func (kv *KVServer) isDuplicate(clientId int64, commandId int64) bool { //判断
 	if !ok {
 		return false
 	}
-	return lastContext.commandId >= commandId
+	return lastContext.CommandId >= commandId
 }
 
-func (kv *KVServer) getWaitApplyChan(index int) chan *CommandReply { //获得第index个entry的获得apply通知管道
+func (kv *KVServer) getWaitApplyChan(index int) chan *CommandReply { //获得第index个entry的apply通知管道
 	_, ok := kv.waitApply[index]
 	if !ok {
 		kv.waitApply[index] = make(chan *CommandReply, 1)
@@ -73,8 +75,8 @@ func (kv *KVServer) Command(args *CommandArgs, reply *CommandReply) {
 	DPrintf("KVNode %v process CommandArgs %v\n", kv.me, args)
 	if args.Op != OpGet && kv.isDuplicate(args.ClientId, args.CommandId) { //处理Put、Append重复请求，这里是为了效率提前过滤一部分，applier中将过滤完所有的
 		DPrintf("KVNode %v process duplicate CommandArgs %v\n", kv.me, args)
-		reply.Value = kv.duplicateMap[args.ClientId].reply.Value
-		reply.Err = kv.duplicateMap[args.ClientId].reply.Err
+		reply.Value = kv.duplicateMap[args.ClientId].Reply.Value
+		reply.Err = kv.duplicateMap[args.ClientId].Reply.Err
 		kv.mu.Unlock()
 		return
 	}
@@ -149,7 +151,7 @@ func (kv *KVServer) applyEntry(op Op) *CommandReply { //将OP应用到KVState上
 	return &reply
 }
 
-func (kv *KVServer) applier() {
+func (kv *KVServer) applier() { //从raft层获得commit的Entry，应用到KVState上
 	for kv.killed() == false {
 		select {
 		case applyMessage := <-kv.applyCh:
@@ -163,17 +165,17 @@ func (kv *KVServer) applier() {
 				}
 				kv.lastApplied = applyMessage.CommandIndex
 				op := applyMessage.Command.(Op)
-				var reply *CommandReply
+				var reply CommandReply
 				if op.Op != OpGet && kv.isDuplicate(op.ClientId, op.CommandId) { //处理Put、Append重复请求
 					DPrintf("KVNode %v process duplicate OP %v\n", kv.me, op)
-					reply = kv.duplicateMap[op.ClientId].reply
+					reply = kv.duplicateMap[op.ClientId].Reply
 				} else {
-					reply = kv.applyEntry(op)
+					reply = *kv.applyEntry(op)
 					DPrintf("KVNode %v apply OP %v to KVState with reply %v\n", kv.me, op, reply)
 					if op.Op != OpGet { //更新duplicate检查map
 						kv.duplicateMap[op.ClientId] = LastContext{
-							commandId: op.CommandId,
-							reply:     reply,
+							CommandId: op.CommandId,
+							Reply:     reply,
 						}
 					}
 				}
@@ -181,23 +183,52 @@ func (kv *KVServer) applier() {
 				currentTerm, isLeader := kv.rf.GetState()
 				if isLeader && currentTerm == applyMessage.CommandTerm { //只有Leader应该回复客户端，还需命令所在Term等于当前Term，防止Leader->Follower->Leader变换，index不是对应的Entry，在client超时时间大于选举时间时可能发生
 					ch := kv.getWaitApplyChan(applyMessage.CommandIndex)
-					ch <- reply
+					ch <- &reply
 					DPrintf("KVNode %v send reply %v to waitApply channel %v %v done\n", kv.me, reply, applyMessage.CommandIndex, ch)
 				}
-				if kv.maxraftstate != -1 {
-					//TODO:make snapshot
+				if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() > kv.maxraftstate { //达到阈值，制作快照
+					kv.rf.Snapshot(applyMessage.CommandIndex, kv.makeSnapshot())
+					DPrintf("KVNode %v make snapshot to index %v\n", kv.me, applyMessage.CommandIndex)
 				}
 				kv.mu.Unlock()
 			} else if applyMessage.SnapshotValid { //apply快照
 				kv.mu.Lock()
-				if kv.rf.CondInstallSnapshot(applyMessage.SnapshotTerm, applyMessage.SnapshotIndex, applyMessage.Snapshot) {
-					//TODO:read snapshot
+				if kv.rf.CondInstallSnapshot(applyMessage.SnapshotTerm, applyMessage.SnapshotIndex, applyMessage.Snapshot) { //让raft持久化新的raft state和快照
+					kv.installSnapshot(applyMessage.Snapshot)
 					kv.lastApplied = applyMessage.SnapshotIndex
+					DPrintf("KVNode %v install snapshot with index %v\n", kv.me, kv.lastApplied)
 				}
 				kv.mu.Unlock()
 			}
 		}
 	}
+}
+
+func (kv *KVServer) makeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvState)
+	e.Encode(kv.duplicateMap)
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var kvState map[string]string
+	var duplicateMap map[int64]LastContext
+	if d.Decode(&kvState) != nil ||
+		d.Decode(&duplicateMap) != nil {
+		fmt.Println("Decode Error! ")
+		return
+	}
+	kv.kvState = kvState
+	kv.duplicateMap = duplicateMap
 }
 
 //
@@ -238,6 +269,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	snapshot := persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		DPrintf("KVNode %v initialize with snapshot\n", kv.me)
+		kv.installSnapshot(snapshot)
+	}
 	go kv.applier()
 
 	return kv
