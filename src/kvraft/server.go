@@ -141,10 +141,10 @@ func (kv *KVServer) applyEntry(op Op) *CommandReply { //将OP应用到KVState上
 		reply.Value, reply.Err = val, OK
 	} else if op.Op == OpPut {
 		kv.kvState[op.Key] = op.Value
-		reply.Value, reply.Err = kv.kvState[op.Key], OK
+		reply.Value, reply.Err = "", OK
 	} else if op.Op == OpAppend {
 		kv.kvState[op.Key] += op.Value
-		reply.Value, reply.Err = kv.kvState[op.Key], OK
+		reply.Value, reply.Err = "", OK
 	}
 	return &reply
 }

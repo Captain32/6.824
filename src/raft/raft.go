@@ -487,7 +487,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) sendOneEntryToPeer(server int, heartbeatFlag bool) { //为server发送一条entry，heartbeatFlag为true则为心跳
+func (rf *Raft) sendOneEntryToPeer(server int, heartbeatFlag bool, done chan bool) { //为server发送一条entry，heartbeatFlag为true则为心跳，done用来告知调用者rpc已成功
 	rf.mu.Lock()
 	//发送消息是异步的，这时候可能已不是leader，需要检查，否则有可能两个分区的leader(假设一个A term 1，一个B term 2)重新连接后
 	// 1.B给A发送心跳，A接受后变成follower，并且term变成2
@@ -575,6 +575,9 @@ func (rf *Raft) sendOneEntryToPeer(server int, heartbeatFlag bool) { //为server
 				rf.votedFor = -1
 				rf.persist()
 			}
+			if !heartbeatFlag {
+				done <- true
+			}
 		} else {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
@@ -594,7 +597,7 @@ func (rf *Raft) broadcastHeartbeat(heartbeatFlag bool) {
 			continue
 		}
 		if heartbeatFlag {
-			go rf.sendOneEntryToPeer(i, heartbeatFlag)
+			go rf.sendOneEntryToPeer(i, heartbeatFlag, nil)
 		} else {
 			DPrintf("Term %v: Server %v replicator to Sever %v cond broadcast\n", rf.currentTerm, rf.me, i)
 			rf.replicateConds[i].Broadcast()
@@ -728,8 +731,14 @@ func (rf *Raft) replicator(server int) { //循环把数据同步给server
 		}
 		DPrintf("Term %v: Server %v replicator to Server %v start\n", rf.currentTerm, rf.me, server)
 		rf.mu.Unlock()
-		go rf.sendOneEntryToPeer(server, false) //用go异步，因为发送失败call会阻塞5s，很容易测试超时，这里睡1.5s直接重试
-		time.Sleep(150 * time.Millisecond)
+		done := make(chan bool, 1)
+		go rf.sendOneEntryToPeer(server, false, done) //用go异步，因为发送失败call会阻塞5s，很容易测试超时，这里要么超时1.5s直接重试，要么成功直接continue
+		select {
+		case <-done:
+			continue
+		case <-time.After(150 * time.Millisecond):
+			continue
+		}
 	}
 }
 
