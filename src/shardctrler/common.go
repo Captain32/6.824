@@ -29,45 +29,32 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OpJoin  = "Join"
+	OpLeave = "Leave"
+	OpMove  = "Move"
+	OpQuery = "Query"
+)
+
+const (
+	OK             = "OK"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+type CommandArgs struct {
+	Servers   map[int][]string //Join
+	GIDs      []int            //Leave
+	Shard     int              //Move
+	GID       int              //Move
+	Num       int              //Query
+	Op        string           // "Join" or "Leave" or "Move" or "Query"
+	ClientId  int64
+	CommandId int64
 }
 
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
-	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
-	Num int // desired config number
-}
-
-type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+type CommandReply struct {
+	Err    Err
+	Config Config //Query
 }
