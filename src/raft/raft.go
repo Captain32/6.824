@@ -680,6 +680,12 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) HasCurrentLog() bool { //当前log中是否有本term的entry，没有的话上层服务需要发送空日志避免活锁
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm == rf.log[len(rf.log)-1].Term
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
