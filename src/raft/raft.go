@@ -234,6 +234,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	DPrintf("Term %v: Server %v receive snapshot from Server %v with Term %v\n", rf.currentTerm, rf.me, args.LeaderId, args.Term)
 	if args.Term > rf.currentTerm { //比自己的term大，更新自己的term
 		rf.currentTerm = args.Term
+		rf.votedFor = -1
 		rf.persist()
 	}
 
@@ -430,6 +431,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("Term %v: Server %v receive AppendEntries request %v from Server %v with Term %v\n", rf.currentTerm, rf.me, args, args.LeaderId, args.Term)
 	if args.Term > rf.currentTerm { //比自己的term大，更新自己的term
 		rf.currentTerm = args.Term
+		rf.votedFor = -1
 		rf.persist()
 	}
 
@@ -644,6 +646,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
+	DPrintf("Term %v: Server %v process new command %v\n", rf.currentTerm, rf.me, command)
 	entry := LogEntry{
 		Term:    rf.currentTerm,
 		Index:   len(rf.log) + rf.log[0].Index,
