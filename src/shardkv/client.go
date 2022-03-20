@@ -113,6 +113,7 @@ func (ck *Clerk) sendCommand(args *KVCommandArgs, reply *KVCommandReply) {
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
+			oldLeaderId := ck.leaderMap[gid]
 			for {
 				srv := ck.make_end(servers[ck.leaderMap[gid]])
 				DPrintf("Client %v send Command args %v to group %v server %v\n", ck.clientId, args, gid, servers[ck.leaderMap[gid]])
@@ -128,6 +129,9 @@ func (ck *Clerk) sendCommand(args *KVCommandArgs, reply *KVCommandReply) {
 				}
 				DPrintf("Client %v send Command args %v fail with reply %v\n", ck.clientId, args, reply)
 				ck.leaderMap[gid] = (ck.leaderMap[gid] + 1) % len(servers)
+				if oldLeaderId == ck.leaderMap[gid] { //避免旧config中的group已经shutdown，但是call失败会一直在本group切换机器，同样会call失败，一直陷入for循环，这里call一整轮都失败了的话就跳出获取新config
+					break
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
