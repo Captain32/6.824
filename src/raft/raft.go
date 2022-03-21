@@ -439,6 +439,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimer.Reset(electionTimeout()) //重置选举超时时间
 
 	if args.PrevLogIndex < rf.log[0].Index { //比自己快照小，不应该
+		reply.ConflictTerm = -1
+		reply.ConflictIndex = rf.log[0].Index + 1 //这里不能忘记赋值！！！！！！否则由于过时的消息导致返回了0，那么leader会调整该follower的nextIndex为0，不停地给follower安装快照，假如leader的快照没有follower的快照大，安装完后再append发现回复还是0，陷入死循环
 		reply.Term, reply.Success = rf.currentTerm, false
 		return
 	}
