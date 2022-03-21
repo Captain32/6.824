@@ -32,11 +32,8 @@
 
 ## Raft协议层
 
-Raft协议的实现主体依据原论文中的描述，主要RPC接口的汇总描述如原论文的Figure 2所示：
+Raft协议的实现主要依据原论文中的描述，RPC接口的汇总描述如原论文的Figure 2所示：
 ![](pic/Raft_RPC.png)
-
-同时为了避免基本Raft算法日志项无限增长的问题，本项目实现了快照功能，其中节点重启从leader快速恢复到最新状态的安装快照RPC接口如原论文的Figure 13所示：
-![](pic/Raft_install_snapshot.png)
 
 ### 节点状态定义
 
@@ -67,27 +64,43 @@ type Raft struct {
 ```
 
 ### Leader选举
-ticker
+为了初始时或者Leader宕机时能够及时选出新的Leader，在启动每个节点的时候，会为每个节点启动一个ticker协程，做为Follower的节点，如果长时间没有收到Leader的心跳或者其他消息，在一定时间后，electionTimer会触发本节点的ticker发起新一轮的选举，切换状态到Candidate，并启动一个协程，异步地向其他所有节点发送RequestVote请求，并在获得一半以上选票后成为leader。该部分实现在`src/raft/raft.go`的ticker和startElection函数中。
 
-RequestVote
+RequestVote接口用于Candidate向其他节点请求选举投票，主要依据原论文描述实现，详见`src/raft/raft.go`的RequestVote接口。
 
 ### 日志项复制
-replicator
+为了Leader能够不阻塞地向所有Follower同步已有的log项，采用了为每个Follower都创建一个协程的方式，每个协程只负责自己对应的Follower的日志项复制，通过检查对应Follower的nextIndex和Leader拥有的最大日志项Index决定需不需要向Follower同步日志项，以及同步多少日志项。为了避免资源浪费，在不满足同步条件时，协程会进入阻塞状态，每当Leader有新的日志项时便会被唤醒检查是否需要同步。该部分实现在`src/raft/raft.go`的replicator函数中。
 
-AppendEntries
+AppendEntries接口用于Leader向Follower复制日志，主要依据原论文描述实现，详见`src/raft/raft.go`的AppendEntries接口。
 
-applier
+replicator函数通过调用sendOneEntryToPeer函数真正的向Follower发送数据，sendOneEntryToPeer函数中会根据要发的日志项索引决定是发送快照(InstallSnapshot)还是日志项(AppendEntries)，并构造相应的请求参数，同时对于AppendEntries还会通过回复信息实时检查是否大于一半的Follower接收到日志项，进而决定能否提交。该部分实现在`src/raft/raft.go`的sendOneEntryToPeer函数中。
+
+假如Leader提交(commit)日志项的同时应用(apply)了日志项，那么由于复制日志项有多个并发协程，可能同一时刻向上层服务的管道中塞了多个相同的日志项，为了分离日志项的提交(commit)和应用(apply)，剥离出了applier协程，通过检查已apply的索引和已commit的索引，不断追赶其间的日志项，同样为了避免资源浪费，在不满足同步条件时，协程会进入阻塞，当commitIndex有更新时将唤醒applier检查，从而不断地向上层服务apply日志项。该部分实现在`src/raft/raft.go`的applier函数中。
 
 ### 快照
-Snapshot
+同时为了避免基本Raft算法日志项无限增长的问题，本项目实现了快照功能，其中节点重启从leader快速恢复到最新状态的安装快照RPC接口如原论文的Figure 13所示：
+![](pic/Raft_install_snapshot.png)
+上层服务可以通过Snapshot函数为将上层服务状态形成的快照发给Raft节点，函数中Raft节点可以截断日志长度，释放内存，并将快照和自己的状态进行持久化，达到节约内存的效果。该部分是现在`src/raft/raft.go`的Snapshot函数中。
 
-InstallSnapshot
+InstallSnapshot接口用于Leader向Follower发送快照，接受方会向上层服务管道发送快照快速达到快照状态，主要依据原论文描述实现，详见`src/raft/raft.go`的InstallSnapshot接口。
 
 ## 分片元数据管理服务
 
 ### 服务端
 
 #### 节点状态定义
+```go
+type ShardCtrler struct {
+	mu      sync.Mutex         //本节点内读写字段的互斥锁，防止竞争
+	me      int                //本节点在共识组中的编号
+	rf      *raft.Raft         //本节点下的Raft节点
+	applyCh chan raft.ApplyMsg //接收Raft节点apply的日志项
+
+	configs      []Config                   //所有版本的配置信息
+	duplicateMap map[int64]LastContext      //存每一个clientId上一个请求的commandId和reply
+	waitApply    map[int]chan *CommandReply //每一次Command请求，用来等待apply后返回给客户端
+}
+```
 
 #### 处理命令
 Command
