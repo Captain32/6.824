@@ -77,10 +77,13 @@ replicator函数通过调用sendOneEntryToPeer函数真正的向Follower发送�
 
 假如Leader提交(commit)日志项的同时应用(apply)了日志项，那么由于复制日志项有多个并发协程，可能同一时刻向上层服务的管道中塞了多个相同的日志项，为了分离日志项的提交(commit)和应用(apply)，剥离出了applier协程，通过检查已apply的索引和已commit的索引，不断追赶其间的日志项，同样为了避免资源浪费，在不满足同步条件时，协程会进入阻塞，当commitIndex有更新时将唤醒applier检查，从而不断地向上层服务apply日志项。该部分实现在`src/raft/raft.go`的applier函数中。
 
+### 持久化
+与论文中描述的一致，Raft节点的currentTerm、votedFor、log三个字段是需要持久化的，因此所有对三个字段进行修改的地方都需要持久化修改，持久化部分实现在`src/raft/raft.go`的persist函数中。
+
 ### 快照
 同时为了避免基本Raft算法日志项无限增长的问题，本项目实现了快照功能，其中节点重启从leader快速恢复到最新状态的安装快照RPC接口如原论文的Figure 13所示：
 ![](pic/Raft_install_snapshot.png)
-上层服务可以通过Snapshot函数为将上层服务状态形成的快照发给Raft节点，函数中Raft节点可以截断日志长度，释放内存，并将快照和自己的状态进行持久化，达到节约内存的效果。该部分是现在`src/raft/raft.go`的Snapshot函数中。
+上层服务可以通过Snapshot函数为将上层服务状态形成的快照发给Raft节点，函数中Raft节点可以截断日志长度，释放内存，并将快照和自己的状态进行持久化，达到节约内存的效果。该部分实现在`src/raft/raft.go`的Snapshot函数中。
 
 InstallSnapshot接口用于Leader向Follower发送快照，接受方会向上层服务管道发送快照快速达到快照状态，主要依据原论文描述实现，详见`src/raft/raft.go`的InstallSnapshot接口。
 
@@ -103,38 +106,82 @@ type ShardCtrler struct {
 ```
 
 #### 处理命令
-Command
+在服务端的实现中，把Query、Join、Leave、Move融合在一个Command接口中，通过op字段区分具体操作，Command接口的实现中会将各种操作打包成一个操作结构体，通过Start函数发给Raft节点发起共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后，便可以将操作执行结果返回给客户端。该部分实现在`src\shardctrler\server.go`的Command接口。
 
 #### 应用命令
-applier
+服务端节点在启动时会启动一个applier协程用于接收Raft层向管道应用的日志项，这里每拿到一个日志项，将区分该操作的类型(Query、Join、Leave、Move)，交给不同的函数进行应用，应用完成后，则构造回复给等待的waitApply管道，从而正式完成一个请求。该部分实现在`src\shardctrler\server.go`的applier函数。
 
 ### 客户端
+客户端的每一个请求，都通过rpc包的Call函数，不断循环尝试直到成功，每次尝试失败都会换一台机器重试。该部分实现在`src\shardctrler\client.go`中。
 
 ## 分片读写服务
 
 ### 服务端
 
 #### 节点状态定义
-分片状态机
+```go
+type ShardKV struct {
+	mu           sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32
+	make_end     func(string) *labrpc.ClientEnd
+	gid          int //所处Group id
+	maxraftstate int //制作快照阈值
+	
+	mck         *shardctrler.Clerk               //Controller客户端
+	config      shardctrler.Config               //当前配置
+	lastconfig  shardctrler.Config               //上一个配置
+	lastApplied int                              //上一个applied entry索引
+	serverState [shardctrler.NShards]*ShardState //每个分片的状态
+	waitApply   map[int]chan *GeneralReply       //每一次请求，用来等待apply后返回给客户端
+}
+```
+
+#### 分片状态机
+为了清晰管理分片的服务、迁移、删除，定义了分片的一系列状态，如下：
+```go
+//shard状态机，从头到尾依次转移状态，再回到Init
+const (
+	ShardInit     ShardMode = iota //空状态
+	ShardPulling                   //数据拉取中
+	ShardDeleting                  //数据拉取完成，删除远端数据源中
+	ShardServing                   //正常服务中
+	ShardPulled                    //被拉取中
+)
+```
 
 #### 处理读写命令
-KVCommand
+在服务端的实现中，把Get、Put、Append融合在一个KVCommand接口中，通过op字段区分具体操作，KVCommand接口的实现中会将各种操作打包成一个操作结构体，通过Start函数发给Raft节点发起共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后，便可以将操作执行结果返回给客户端。该部分实现在`src\shardkv\server.go`的KVCommand接口。
 
 #### 更新分片配置
-updater
+如果下层的Raft节点是Leader，那么本服务节点会启动协程updater，定期负责向元数据管理服务Query新的配置，这里会检查是否具备更新配置的前置条件，需要已完成本轮配置，即所有分片状态处于Init或者Serve，符合条件且有新的配置，则向Raft层发起op为Config的共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后返回。该部分实现在`src\shardkv\server.go`的updater函数。
+
+applier协程在遇到Config操作时，会更新服务器状态中的config，并且通过新老配置的差异更新分片所处状态(Init->Serve、Init->Pulling、Serve->Pulled)，该部分实现在`src\shardkv\server.go`的applyConfigCommand函数。
 
 #### 处理拉取分片命令
-PullShard
+如果下层的Raft节点是Leader，那么本服务节点会启动协程puller，定期检查是否有分片状态处于Pulling，对于处在Pulling状态的分片，则启动协程向对应的Group发起拉取分片的请求，将回复中的分片状态打包成op为Pull的操作向Raft层发起共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后返回。该部分实现在`src\shardkv\server.go`的puller函数。
 
-puller
+applier协程在遇到Pull操作时，会更新服务器状态中对应分片的状态，并且更新分片所处状态(Pulling->Deleting)，该部分实现在`src\shardkv\server.go`的applyPullCommand函数。
+
+PullShard被调用者会根据参数配置版本号ConfigNum判断是否将对应分片内容发送给调用方，符合则将分片内容返回。该部分实现在`src\shardkv\server.go`的PullShard接口。
 
 #### 处理删除分片命令
-DeleteShard
+如果下层的Raft节点是Leader，那么本服务节点会启动协程deleter，定期检查是否有分片状态处于Deleting，对于处在Deleting状态的分片，则启动协程向对应的Group发起删除分片的请求，将成功的回复打包成op为Serve的操作向Raft层发起共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后返回。该部分实现在`src\shardkv\server.go`的deleter函数。
 
-deleter
+applier协程在遇到Serve操作时，会更新分片所处状态(Deleting->Serve)，该部分实现在`src\shardkv\server.go`的applyServeCommand函数。
+
+DeleteShard被调用者会根据参数配置版本号ConfigNum判断是否将对应分片内容删除，符合则将对应的分片ids打包成op为Delete的操作向Raft层发起共识，并且新建一个waitApply的管道等待共识完成并且apply操作，当等待完成或者超时后返回。。该部分实现在`src\shardkv\server.go`的DeleteShard接口。
+
+applier协程在遇到Delete操作时，会释放对应分片数据的内存，并且更新分片所处状态(Pulled->Init)，该部分实现在`src\shardkv\server.go`的applyDeleteCommand函数。
 
 #### 空命令
-emptySender
+如果下层的Raft节点是Leader，那么本服务节点会启动协程emptySender，定期检查当前Raft节点是否尚未有本任期内的日志项，没有则提交一个op为Empty的空操作，避免活锁。该部分实现在`src\shardkv\server.go`的emptySender函数。
 
+极端情况下比如group中三个主机A、B、C，A为leader，raft层的日志假设为[1,2]，A commit并且apply了2，但是B和C还没有， 这时整个group宕机了，重启后B成为新leader，虽然raft层的日志也为[1,2]但是由于不知道2是否已被提交，raft层会一直等待本任期的entry被提交顺带将之前任期的entry提交，假如说2在本服务里是把shard的mode从Pulled设置为Init，A其实已经apply所以可以进一步的拉取新的config，但是B由于一直等待本任期的entry，不敢commit以及apply这个之前任期的entry，所以那个shard会一直处于Pulled状态，因此无法更进一步拉取新的配置，形成了活锁，因此上任后发送一个空操作可以避免这种情况，快速地将之前任期的entry一并commit以及apply。
+
+#### 应用命令
+服务端节点在启动时会启动一个applier协程用于接收Raft层向管道应用的日志项，这里每拿到一个日志项，将区分该操作的类型(Get、Put、Append、Config、Pull、Serve、Delete、Empty)，交给不同的函数进行应用，应用完成后，则构造回复给等待的waitApply管道，从而正式完成一个请求。同时applier会检查下层Raft状态的大小，超过阈值则进行快照的制作。该部分实现在`src\shardkv\server.go`的applier函数。
 
 ### 客户端
